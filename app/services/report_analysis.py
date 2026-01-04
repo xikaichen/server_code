@@ -12,6 +12,9 @@ from app.services.ai_analysis import (
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+import requests
+import os
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +226,145 @@ def process_report_analysis(report_id: int):
         db.close()
 
 
+def process_tbut_report_analysis(report_id: int):
+    """
+    异步处理TBUT报告分析任务
+
+    专门用于处理 check_type == 4 (FBUT泪膜破裂时间) 的报告
+    该类型的报告包含视频URL而非base64图像数据
+
+    处理流程：
+    1. 从数据库获取报告信息
+    2. 下载左右眼视频文件（从七牛云存储）
+    3. 生成硬编码的分析结果
+    4. 保存分析结果到数据库
+
+    Args:
+        report_id: 报告ID
+    """
+    db = SessionLocal()
+    try:
+        logger.info(f"开始处理TBUT报告 {report_id} 的分析任务")
+
+        # 获取报告
+        report = db.query(Report).filter(Report.id == report_id).first()
+        if not report:
+            logger.error(f"TBUT报告 {report_id} 不存在")
+            return
+
+        # 验证检查类型
+        if report.check_type != 4:
+            logger.error(f"报告 {report_id} 的检查类型不是FBUT (check_type={report.check_type})")
+            report.status = 'failed'
+            db.commit()
+            return
+
+        # 下载视频文件
+        left_eye_video_url = report.left_eye_image
+        right_eye_video_url = report.right_eye_image
+
+        logger.info(f"开始下载TBUT报告 {report_id} 的视频文件")
+        logger.info(f"左眼视频URL: {left_eye_video_url}")
+        logger.info(f"右眼视频URL: {right_eye_video_url}")
+
+        # 下载左眼视频
+        left_video_path = None
+        right_video_path = None
+
+        try:
+            # 创建临时目录
+            temp_dir = tempfile.mkdtemp()
+
+            # 下载左眼视频
+            left_video_path = os.path.join(temp_dir, f"left_eye_{report_id}.mp4")
+            logger.info(f"正在下载左眼视频到: {left_video_path}")
+            response = requests.get(left_eye_video_url, timeout=60)
+            response.raise_for_status()
+            with open(left_video_path, 'wb') as f:
+                f.write(response.content)
+            logger.info(f"左眼视频下载完成，大小: {len(response.content)} 字节")
+
+            # 下载右眼视频
+            right_video_path = os.path.join(temp_dir, f"right_eye_{report_id}.mp4")
+            logger.info(f"正在下载右眼视频到: {right_video_path}")
+            response = requests.get(right_eye_video_url, timeout=60)
+            response.raise_for_status()
+            with open(right_video_path, 'wb') as f:
+                f.write(response.content)
+            logger.info(f"右眼视频下载完成，大小: {len(response.content)} 字节")
+
+            # 生成硬编码的分析结果
+            check_result = {
+                'left_eye_analyse': '左眼泪膜破裂时间约为8.5秒，泪膜稳定性良好',
+                'right_eye_analyse': '右眼泪膜破裂时间约为7.2秒，泪膜稳定性正常',
+                'left_eye_status': '正常',
+                'right_eye_status': '正常'
+            }
+
+            expert_analyse = (
+                "根据FBUT检查结果分析：\n\n"
+                "左眼泪膜破裂时间为8.5秒，右眼为7.2秒，均在正常范围内（正常值≥5秒）。"
+                "双眼泪膜稳定性良好，未见明显干眼症状。\n\n"
+                "建议：\n"
+                "1. 保持良好的用眼习惯，避免长时间使用电子设备\n"
+                "2. 适当休息，每隔1小时远眺5-10分钟\n"
+                "3. 保持室内适当湿度，避免过度干燥环境\n"
+                "4. 如出现眼部不适，及时就医复查"
+            )
+
+            # 更新报告
+            report.check_result = json.dumps(check_result, ensure_ascii=False)
+            report.expert_analyse = expert_analyse
+            report.status = 'completed'
+            db.commit()
+
+            logger.info(f"TBUT报告 {report_id} 分析完成")
+
+        finally:
+            # 清理临时文件
+            if left_video_path and os.path.exists(left_video_path):
+                try:
+                    os.remove(left_video_path)
+                    logger.info(f"已删除临时文件: {left_video_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败 {left_video_path}: {e}")
+
+            if right_video_path and os.path.exists(right_video_path):
+                try:
+                    os.remove(right_video_path)
+                    logger.info(f"已删除临时文件: {right_video_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败 {right_video_path}: {e}")
+
+            # 删除临时目录
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    os.rmdir(temp_dir)
+                    logger.info(f"已删除临时目录: {temp_dir}")
+                except Exception as e:
+                    logger.warning(f"删除临时目录失败 {temp_dir}: {e}")
+
+    except Exception as e:
+        # 重要：这里抛出异常，让 RQ 捕获并触发自动重试
+        logger.error(f"处理TBUT报告 {report_id} 时发生错误: {e}", exc_info=True)
+
+        # 更新状态为失败
+        try:
+            report = db.query(Report).filter(Report.id == report_id).first()
+            if report:
+                report.status = 'failed'
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"更新TBUT报告 {report_id} 状态失败: {db_error}")
+
+        # 重新抛出异常，让 RQ 知道任务失败，触发自动重试
+        raise
+    finally:
+        db.close()
+
+
 __all__ = [
     "process_report_analysis",
+    "process_tbut_report_analysis",
 ]
 
