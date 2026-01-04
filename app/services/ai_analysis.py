@@ -6,6 +6,9 @@ from typing import List
 import requests
 
 from app.config import settings
+from app.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # 不同检查类型的图像分析提示词（用于左右眼单次分析）
 CHECK_TYPE_GUIDE_PROMPTS = {
@@ -54,10 +57,10 @@ def get_ai_analysis(quest_messages: List[dict]) -> str:
 
         response = requests.request("POST", url, headers=headers, data=payload)
         response_json = json.loads(response.text)
-        print('response_json', response_json)
+        logger.debug(f"AI分析响应: {response_json}")
         return response_json['choices'][0]['message']['content']
     except Exception as exc:  # pragma: no cover - logging helper
-        print("专家分析失败", exc)
+        logger.error(f"AI专家分析失败: {exc}", exc_info=True)
         raise Exception("专家分析失败") from exc
 
 

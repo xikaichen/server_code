@@ -10,6 +10,9 @@ from qiniu import Auth, put_data
 from app.config import settings
 from app.models.response import Response
 from app.constants import error_codes
+from app.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 upload_router = APIRouter(prefix=f"{settings.API_V1_STR}/upload", tags=["upload"])
 
@@ -56,7 +59,7 @@ async def upload_base64(data: Base64UploadRequest):
         else:
             return Response(code=error_codes.INTERNAL_SERVER_ERROR, message="上传到七牛失败")
     except Exception as e:
-        print(f"上传异常: {str(e)}")
+        logger.error(f"Base64上传异常: {e}", exc_info=True)
         return Response(code=error_codes.INTERNAL_SERVER_ERROR, message=f"上传异常: {str(e)}")
 
 @upload_router.post("/file")
@@ -80,5 +83,5 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             return Response(code=error_codes.INTERNAL_SERVER_ERROR, message="上传到七牛失败")
     except Exception as e:
-        print(f"上传异常: {str(e)}")
-        return Response(code=error_codes.INTERNAL_SERVER_ERROR, message=f"上传异常: {str(e)}") 
+        logger.error(f"文件上传异常: {e}", exc_info=True)
+        return Response(code=error_codes.INTERNAL_SERVER_ERROR, message=f"上传异常: {str(e)}")

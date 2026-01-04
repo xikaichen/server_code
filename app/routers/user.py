@@ -18,6 +18,7 @@ from app.utils.security import (
 )
 from app.utils.database import get_redis_client, get_db
 from app.config import settings
+from app.utils.logging_config import get_logger
 from sqlalchemy.orm import Session
 import requests
 import secrets
@@ -25,6 +26,8 @@ import time
 import json
 from typing import Optional
 import random
+
+logger = get_logger(__name__)
 
 user_router = APIRouter(prefix=f"{settings.API_V1_STR}/user", tags=["user"])
 
@@ -102,7 +105,7 @@ async def get_sms_code(form_data: SMSCodeForm):
         json.dumps(code_data)
     )
 
-    print('sms_codes', redis_client.get(f"sms_code:{phone}"), phone)
+    logger.debug(f"发送验证码到手机号: {phone}")
 
     # 发送验证码
     body = {"name": settings.SMS_PLATFORM_NAME, "code": code, "targets": phone}
@@ -226,7 +229,7 @@ async def logout(request: Request):
             message="登出成功"
         )
     except Exception as e:
-        print('logout', e)
+        logger.error(f"用户登出失败: {e}", exc_info=True)
         return Response(
             code=INTERNAL_SERVER_ERROR,
             message=f"登出失败: {str(e)}"
@@ -296,7 +299,7 @@ async def update_user_info(
             data=updated_user
         )
     except Exception as e:
-        print('update_user_info', e)
+        logger.error(f"更新用户信息失败: {e}", exc_info=True)
         return Response(
             code=INTERNAL_SERVER_ERROR,
             message=f"更新用户信息失败: {str(e)}"
@@ -334,7 +337,7 @@ async def get_user_info(
             data=user_info
         )
     except Exception as e:
-        print('get_user_info', e)
+        logger.error(f"获取用户信息失败: {e}", exc_info=True)
         return Response(
             code=INTERNAL_SERVER_ERROR,
             message=f"获取用户信息失败: {str(e)}"

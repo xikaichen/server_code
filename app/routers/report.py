@@ -16,6 +16,9 @@ from app.services.ai_analysis import (
     CHECK_TYPE_GUIDE_PROMPTS,
     CHECK_TYPE_EXPERT_PROMPTS,
 )
+from app.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 report_router = APIRouter(prefix=f"{settings.API_V1_STR}/report", tags=["report"])
 
@@ -134,7 +137,7 @@ def create_report(
             status=db_report.status
         ))
     except Exception as e:
-        print('创建报告失败', e)
+        logger.error(f"创建报告失败: {e}", exc_info=True)
         return Response(code=error_codes.INTERNAL_SERVER_ERROR, message="创建报告失败")
 
 @report_router.get("/{report_id}", response_model=Response[ReportDetailResponse])

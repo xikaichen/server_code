@@ -9,7 +9,14 @@ from app.routers.questionnaire import questionnaire_router
 from app.routers.upload import upload_router
 from app.models.user import Response
 from app.middleware.auth_middleware import create_auth_middleware
+from app.utils.logging_config import setup_logging, get_logger
+from app.config import settings
 import redis
+import logging
+
+# 初始化日志系统
+setup_logging()
+logger = get_logger(__name__)
 
 app = FastAPI(
     title="yuekai_ophthalmology",
@@ -32,7 +39,7 @@ create_auth_middleware(app)
 # 全局处理 Redis 异常
 @app.exception_handler(redis.exceptions.RedisError)
 async def redis_exception_handler(request: Request, exc: redis.exceptions.RedisError):
-    print('redis_exception_handler', exc)
+    logger.error(f"Redis异常: {exc}", exc_info=True)
 
     return JSONResponse(
         status_code=500,
@@ -41,7 +48,7 @@ async def redis_exception_handler(request: Request, exc: redis.exceptions.RedisE
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request, exc):
-    print('http_exception_handler', exc)
+    logger.warning(f"HTTP异常 [{exc.status_code}]: {exc.detail}")
 
     # return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
     return JSONResponse(
@@ -74,8 +81,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
     error_messages = [f"{err['loc'][-1]}: {err['msg']}" for err in exc.errors()]
 
-    print('validation_exception_handler', error_messages)
-    
+    logger.warning(f"请求参数验证失败: {error_messages}")
+
     return JSONResponse(
         status_code=422,
         content=Response(
@@ -84,6 +91,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             data=None
         ).model_dump()
     )
+
+# 应用启动事件
+@app.on_event("startup")
+async def startup_event():
+    logger.info("FastAPI 应用启动成功")
+    logger.info(f"应用名称: {app.title}")
+    logger.info(f"版本: {app.version}")
+    logger.info(f"调试模式: {settings.DEBUG}")
+
+# 应用关闭事件
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("FastAPI 应用正在关闭...")
 
 # 注册路由
 app.include_router(user_router)

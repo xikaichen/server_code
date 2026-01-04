@@ -46,3 +46,6 @@ wsproto==1.2.0
 typing_extensions==4.12.2
 rq==1.15.1
 pyarmor==8.5.7
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+scipy==1.13.1
