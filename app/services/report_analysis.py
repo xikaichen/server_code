@@ -124,6 +124,7 @@ def sustained_drop(baseline, series, ratio=0.6, sustain_frames=5):
     return None
 
 def get_tbut(video_path):
+    logger.info(f"开始计算tbut")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频：{video_path}")

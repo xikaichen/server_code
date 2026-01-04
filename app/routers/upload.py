@@ -39,6 +39,7 @@ def generate_qiniu_key(filename: str) -> str:
 
 @upload_router.post("/base64")
 async def upload_base64(data: Base64UploadRequest):
+    logger.info(f"开始图片上传")
     try:
         base64_data = data.base64_data
         filename = data.filename
@@ -65,6 +66,7 @@ async def upload_base64(data: Base64UploadRequest):
 @upload_router.post("/file")
 async def upload_file(file: UploadFile = File(...)):
     """文件上传接口（用于视频等大文件）"""
+    logger.info(f"开始video上传")
     try:
         # 读取文件内容
         file_bytes = await file.read()
