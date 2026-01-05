@@ -19,6 +19,7 @@ import tempfile
 import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+import base64
 
 N_SECTORS = 12                     # 扇区数（15°/扇区）
 MIN_PUPIL_R = 60                   # Hough 搜索半径下限（像素，按你的视频适当调整）
@@ -200,6 +201,58 @@ def get_tbut(video_path):
 
 
 logger = logging.getLogger(__name__)
+
+
+def extract_frames_from_video(video_path: str, interval_seconds: int = 1) -> list:
+    """
+    从视频中提取帧并转换为base64格式
+
+    Args:
+        video_path: 视频文件路径
+        interval_seconds: 采样间隔（秒），默认每秒提取一帧
+
+    Returns:
+        list: base64编码的帧列表
+    """
+    frames_base64 = []
+
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"无法打开视频文件: {video_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_interval = int(fps * interval_seconds)
+        frame_count = 0
+
+        logger.info(f"视频FPS: {fps}, 采样间隔: {frame_interval}帧")
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # 按间隔提取帧
+            if frame_count % frame_interval == 0:
+                # 将帧编码为JPEG格式
+                _, buffer = cv2.imencode('.jpg', frame)
+                # 转换为base64
+                frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                # 添加data URI前缀
+                frame_base64_uri = f"data:image/jpeg;base64,{frame_base64}"
+                frames_base64.append(frame_base64_uri)
+                logger.debug(f"提取第 {len(frames_base64)} 帧 (总帧数: {frame_count})")
+
+            frame_count += 1
+
+        cap.release()
+        logger.info(f"从视频中提取了 {len(frames_base64)} 帧")
+
+    except Exception as e:
+        logger.error(f"提取视频帧失败: {e}", exc_info=True)
+        raise
+
+    return frames_base64
 
 
 def process_report_analysis(report_id: int):
@@ -543,8 +596,245 @@ def process_tbut_report_analysis(report_id: int):
         db.close()
 
 
+def process_llt_report_analysis(report_id: int):
+    """
+    异步处理LLT（脂质层厚度）报告分析任务
+
+    专门用于处理 check_type == 7 (脂质层分析) 的报告
+    该类型的报告包含视频URL而非base64图像数据
+
+    处理流程：
+    1. 从数据库获取报告信息
+    2. 下载左右眼视频文件（从七牛云存储）
+    3. 提取视频帧并转换为base64格式
+    4. 使用AI分析每一帧的脂质层情况
+    5. 聚合分析结果并保存到数据库
+
+    Args:
+        report_id: 报告ID
+    """
+    db = SessionLocal()
+    try:
+        logger.info(f"开始处理LLT报告 {report_id} 的分析任务")
+
+        # 获取报告
+        report = db.query(Report).filter(Report.id == report_id).first()
+        if not report:
+            logger.error(f"LLT报告 {report_id} 不存在")
+            return
+
+        # 验证检查类型
+        if report.check_type != 7:
+            logger.error(f"报告 {report_id} 的检查类型不是脂质层分析 (check_type={report.check_type})")
+            report.status = 'failed'
+            db.commit()
+            return
+
+        # 下载视频文件
+        left_eye_video_url = report.left_eye_image
+        right_eye_video_url = report.right_eye_image
+
+        logger.info(f"开始下载LLT报告 {report_id} 的视频文件")
+        logger.info(f"左眼视频URL: {left_eye_video_url}")
+        logger.info(f"右眼视频URL: {right_eye_video_url}")
+
+        # 下载左眼视频
+        left_video_path = None
+        right_video_path = None
+
+        try:
+            # 创建临时目录
+            temp_dir = tempfile.mkdtemp()
+
+            # 下载左眼视频
+            left_video_path = os.path.join(temp_dir, f"left_eye_{report_id}.mp4")
+            logger.info(f"正在下载左眼视频到: {left_video_path}")
+            response = requests.get(left_eye_video_url, timeout=60)
+            response.raise_for_status()
+            with open(left_video_path, 'wb') as f:
+                f.write(response.content)
+            logger.info(f"左眼视频下载完成，大小: {len(response.content)} 字节")
+
+            # 下载右眼视频
+            right_video_path = os.path.join(temp_dir, f"right_eye_{report_id}.mp4")
+            logger.info(f"正在下载右眼视频到: {right_video_path}")
+            response = requests.get(right_eye_video_url, timeout=60)
+            response.raise_for_status()
+            with open(right_video_path, 'wb') as f:
+                f.write(response.content)
+            logger.info(f"右眼视频下载完成，大小: {len(response.content)} 字节")
+
+            # 提取视频帧
+            logger.info(f"开始提取左眼视频帧")
+            left_eye_frames = extract_frames_from_video(left_video_path, interval_seconds=1)
+            logger.info(f"左眼视频提取了 {len(left_eye_frames)} 帧")
+
+            logger.info(f"开始提取右眼视频帧")
+            right_eye_frames = extract_frames_from_video(right_video_path, interval_seconds=1)
+            logger.info(f"右眼视频提取了 {len(right_eye_frames)} 帧")
+
+            # 获取脂质层分析提示词
+            guide_prompt = CHECK_TYPE_GUIDE_PROMPTS.get(7)
+
+            # 构造多帧图像的提示消息（将所有帧放在一个API调用中）
+            def build_multi_frame_messages(frames_base64: list, text_prompt: str):
+                """
+                构造包含多个视频帧的消息
+                GPT可以看到所有帧，从而进行时序分析
+                """
+                content = []
+
+                # 添加所有帧图像
+                for i, frame in enumerate(frames_base64):
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": frame
+                        }
+                    })
+
+                # 添加文本提示（放在所有图像之后）
+                content.append({
+                    "type": "text",
+                    "text": f"以上是从视频中按时间顺序提取的 {len(frames_base64)} 帧图像。{text_prompt}"
+                })
+
+                return [
+                    {
+                        "role": "user",
+                        "content": content
+                    }
+                ]
+
+            # 分析左眼视频（一次性发送所有帧）
+            logger.info(f"开始AI分析左眼视频（共 {len(left_eye_frames)} 帧）")
+            left_eye_messages = build_multi_frame_messages(left_eye_frames, guide_prompt)
+            left_eye_analyse = get_ai_analysis(left_eye_messages).strip()
+            logger.info(f"左眼视频分析完成")
+
+            # 分析右眼视频（一次性发送所有帧）
+            logger.info(f"开始AI分析右眼视频（共 {len(right_eye_frames)} 帧）")
+            right_eye_messages = build_multi_frame_messages(right_eye_frames, guide_prompt)
+            right_eye_analyse = get_ai_analysis(right_eye_messages).strip()
+            logger.info(f"右眼视频分析完成")
+
+            # 判断左右眼检查状态（基于分析结果）
+            logger.info(f"判断左右眼检查状态")
+
+            # 构造状态判断消息
+            left_status_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f'请根据以下分析结果，判断该检查结果是正常还是异常，仅回答"正常"或"异常"：\n{left_eye_analyse}'
+                        }
+                    ]
+                }
+            ]
+
+            right_status_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f'请根据以下分析结果，判断该检查结果是正常还是异常，仅回答"正常"或"异常"：\n{right_eye_analyse}'
+                        }
+                    ]
+                }
+            ]
+
+            # 并行判断左右眼状态
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                left_status_future = executor.submit(get_ai_analysis, left_status_messages)
+                right_status_future = executor.submit(get_ai_analysis, right_status_messages)
+                left_eye_status = left_status_future.result().strip()
+                right_eye_status = right_status_future.result().strip()
+
+            # 构造检查结果
+            check_result = {
+                'left_eye_analyse': left_eye_analyse,
+                'right_eye_analyse': right_eye_analyse,
+                'left_eye_status': left_eye_status,
+                'right_eye_status': right_eye_status
+            }
+
+            # 获取专家分析提示词
+            expert_prompt = CHECK_TYPE_EXPERT_PROMPTS.get(7, "根据脂质层分析结果，评估泪膜质量并提供护理建议")
+
+            # 构造专家分析消息（包含左右眼的分析结果）
+            expert_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"左眼分析结果：{left_eye_analyse}\n右眼分析结果：{right_eye_analyse}\n\n{expert_prompt}"
+                        }
+                    ]
+                }
+            ]
+
+            # 获取专家分析
+            logger.info(f"生成专家分析")
+            expert_analyse = get_ai_analysis(expert_messages).strip()
+
+            # 更新报告
+            report.check_result = json.dumps(check_result, ensure_ascii=False)
+            report.expert_analyse = expert_analyse
+            report.status = 'completed'
+            db.commit()
+
+            logger.info(f"LLT报告 {report_id} 分析完成")
+
+        finally:
+            # 清理临时文件
+            if left_video_path and os.path.exists(left_video_path):
+                try:
+                    os.remove(left_video_path)
+                    logger.info(f"已删除临时文件: {left_video_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败 {left_video_path}: {e}")
+
+            if right_video_path and os.path.exists(right_video_path):
+                try:
+                    os.remove(right_video_path)
+                    logger.info(f"已删除临时文件: {right_video_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败 {right_video_path}: {e}")
+
+            # 删除临时目录
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    os.rmdir(temp_dir)
+                    logger.info(f"已删除临时目录: {temp_dir}")
+                except Exception as e:
+                    logger.warning(f"删除临时目录失败 {temp_dir}: {e}")
+
+    except Exception as e:
+        # 重要：这里抛出异常，让 RQ 捕获并触发自动重试
+        logger.error(f"处理LLT报告 {report_id} 时发生错误: {e}", exc_info=True)
+
+        # 更新状态为失败
+        try:
+            report = db.query(Report).filter(Report.id == report_id).first()
+            if report:
+                report.status = 'failed'
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"更新LLT报告 {report_id} 状态失败: {db_error}")
+
+        # 重新抛出异常，让 RQ 知道任务失败，触发自动重试
+        raise
+    finally:
+        db.close()
+
+
 __all__ = [
     "process_report_analysis",
     "process_tbut_report_analysis",
+    "process_llt_report_analysis",
 ]
 

@@ -10,7 +10,7 @@
 from rq import Queue, Retry
 from rq.job import Job
 from app.utils.database import get_redis_client_for_rq
-from app.services.report_analysis import process_report_analysis, process_tbut_report_analysis
+from app.services.report_analysis import process_report_analysis, process_tbut_report_analysis, process_llt_report_analysis
 from app.config import settings
 import logging
 
@@ -141,5 +141,41 @@ def enqueue_tbut_report_analysis(report_id: int):
     )
 
     logger.info(f"TBUT报告 {report_id} 的分析任务已加入队列，Job ID: {job.id}，已配置自动重试（最多{settings.RQ_JOB_RETRY_MAX}次）")
+    return job
+
+
+def enqueue_llt_report_analysis(report_id: int):
+    """
+    将LLT（脂质层厚度）报告分析任务加入队列，并配置重试和超时
+
+    专门用于处理 check_type == 7 (脂质层分析) 的报告分析
+    该类型的报告包含视频URL而非base64图像数据
+
+    Args:
+        report_id: 报告ID
+
+    Returns:
+        Job: RQ Job 实例
+    """
+    queue = get_task_queue()
+
+    # 配置重试机制（与TBUT报告分析相同）
+    retry = Retry(
+        max=settings.RQ_JOB_RETRY_MAX,
+        interval=settings.RQ_JOB_RETRY_DELAY
+    )
+
+    # 入队任务，配置超时和重试
+    job = queue.enqueue(
+        process_llt_report_analysis,
+        report_id,
+        job_timeout=settings.RQ_JOB_TIMEOUT,
+        result_ttl=settings.RQ_JOB_RESULT_TTL,
+        failure_ttl=settings.RQ_JOB_FAILURE_TTL,
+        retry=retry,
+        job_id=f'llt_report_analysis_{report_id}',
+    )
+
+    logger.info(f"LLT报告 {report_id} 的分析任务已加入队列，Job ID: {job.id}，已配置自动重试（最多{settings.RQ_JOB_RETRY_MAX}次）")
     return job
 

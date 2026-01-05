@@ -11,7 +11,7 @@ from app.models.report import Report
 from app.models.patient import Patient
 from app.constants import error_codes
 from typing import List
-from app.utils.tasks import enqueue_report_analysis, enqueue_tbut_report_analysis
+from app.utils.tasks import enqueue_report_analysis, enqueue_tbut_report_analysis, enqueue_llt_report_analysis
 from app.services.ai_analysis import (
     CHECK_TYPE_GUIDE_PROMPTS,
     CHECK_TYPE_EXPERT_PROMPTS,
@@ -104,12 +104,11 @@ def create_report(
     try:
         # 定义不需要AI分析的检查类型
         # 1: 眼表拍照（常规检查）
-        # 7: 脂质层分析（视频，不需要AI分析）
-        no_ai_analysis_types = {1, 7}
+        no_ai_analysis_types = {1}
 
         # 验证检查类型
-        # check_type == 4 (FBUT) 使用专门的处理逻辑，不需要验证提示词
-        if report.check_type not in no_ai_analysis_types and report.check_type != 4:
+        # check_type == 4 (FBUT) 和 check_type == 7 (LLT) 使用专门的处理逻辑，不需要验证提示词
+        if report.check_type not in no_ai_analysis_types and report.check_type not in {4, 7}:
             guide_prompt = CHECK_TYPE_GUIDE_PROMPTS.get(report.check_type)
             if not guide_prompt:
                 return Response(code=error_codes.BAD_REQUEST, message="不支持的检查类型")
@@ -128,6 +127,9 @@ def create_report(
         if report.check_type == 4:
             # FBUT泪膜破裂时间使用专门的任务处理
             enqueue_tbut_report_analysis(db_report.id)
+        elif report.check_type == 7:
+            # 脂质层分析使用专门的任务处理
+            enqueue_llt_report_analysis(db_report.id)
         elif report.check_type not in no_ai_analysis_types:
             # 其他需要AI分析的检查类型使用通用任务处理
             enqueue_report_analysis(db_report.id)
