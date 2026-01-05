@@ -822,6 +822,7 @@ def process_llt_report_analysis(report_id: int):
             report = db.query(Report).filter(Report.id == report_id).first()
             if report:
                 report.status = 'failed'
+                report.expert_messages = str(e)
                 db.commit()
         except Exception as db_error:
             logger.error(f"更新LLT报告 {report_id} 状态失败: {db_error}")
