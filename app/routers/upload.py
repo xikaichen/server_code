@@ -23,9 +23,6 @@ secret_key = "1kCS0uLpKwrIbY4ZHHxukxRmp2teUw8N8KGQSnIi"
 bucket_name = "yuekai-ophthalmology"
 domain = "https://cdn.yokai-tech.com"
 
-# 本地存储配置
-UPLOAD_DIR = Path(__file__).parent.parent.parent / 'uploads'
-UPLOAD_DIR.mkdir(exist_ok=True)
 
 class Base64UploadRequest(BaseModel):
     base64_data: str
