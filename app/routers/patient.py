@@ -82,14 +82,18 @@ def get_patient_list(
     birth: Optional[str] = None,
     address: Optional[str] = None,
     gender: Optional[str] = None,
+    page_no: int = Query(1, ge=1, description="页码，从1开始"),
+    page_size: int = Query(5, ge=1, le=100, description="每页大小"),
     db: Session = Depends(get_db)
 ):
-    """获取患者列表"""
-    
+    """获取患者列表（支持分页，搜索时返回所有结果）"""
+
     list = db.query(Patient)
+    is_search = False  # 标记是否为搜索模式
 
     if keyword:
         # 通用搜索：根据ID、姓名或手机号搜索
+        is_search = True
         try:
             # 尝试将搜索词转换为ID
             search_id = int(keyword)
@@ -97,19 +101,33 @@ def get_patient_list(
         except ValueError:
             # 如果不是数字，则按姓名或手机号搜索
             list = list.filter(
-                (Patient.name.like(f"%{keyword}%")) | 
+                (Patient.name.like(f"%{keyword}%")) |
                 (Patient.phone.like(f"%{keyword}%"))
             )
     else:
         # 保持原有的单独搜索功能
         if gender:
+            is_search = True
             list = list.filter(Patient.gender == int(gender))
         if birth:
+            is_search = True
             list = list.filter(Patient.birth == birth)
         if address:
+            is_search = True
             list = list.filter(Patient.address.like(f"%{address}%"))
 
-    list = list.order_by(Patient.id.desc()).all()
+    # 排序
+    list = list.order_by(Patient.id.desc())
+
+    # 如果是搜索模式，返回所有结果；否则应用分页
+    if is_search:
+        # 搜索模式：返回所有匹配结果
+        list = list.all()
+    else:
+        # 普通加载模式：应用分页限制
+        offset = (page_no - 1) * page_size
+        list = list.offset(offset).limit(page_size).all()
+
     return Response(data=list)
 
 

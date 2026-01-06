@@ -180,12 +180,13 @@ def get_report_list(
     gender: Optional[str] = None,
     patient_id: int = 0,
     page_no: int = Query(1, ge=1, description="页码，从1开始"),
-    page_size: int = Query(10, ge=1, le=100, description="每页大小"),
+    page_size: int = Query(5, ge=1, le=100, description="每页大小"),
     db: Session = Depends(get_db),
 ):
-    """获取报告列表（支持分页）"""  
-    
+    """获取报告列表（支持分页，搜索时返回所有结果）"""
+
     list = db.query(Report)
+    is_search = False  # 标记是否为搜索模式
 
     # 如果是获取指定患者报告，则只获取该患者报告
     if patient_id != 0:
@@ -194,6 +195,7 @@ def get_report_list(
     # 如果是获取所有报告，则根据关键词、性别、出生日期、地址搜索
     elif keyword:
         # 通用搜索：根据ID、姓名或手机号搜索
+        is_search = True
         try:
             # 尝试将搜索词转换为ID
             search_id = int(keyword)
@@ -208,6 +210,7 @@ def get_report_list(
         # 保持原有的单独搜索功能
         has_patient_filter = any([gender, birth, address])
         if has_patient_filter:
+            is_search = True
             list = list.join(Patient, Report.patient_id == Patient.id)
         if gender:
             list = list.filter(Patient.gender == int(gender))
@@ -215,13 +218,21 @@ def get_report_list(
             list = list.filter(Patient.birth == birth)
         if address:
             list = list.filter(Patient.address.like(f"%{address}%"))
-    
+
     # 计算总记录数（在分页前）
     total = list.count()
-    
-    # 分页查询
-    offset = (page_no - 1) * page_size
-    list = list.order_by(Report.id.desc()).offset(offset).limit(page_size).all()
+
+    # 排序
+    list = list.order_by(Report.id.desc())
+
+    # 如果是搜索模式，返回所有结果；否则应用分页
+    if is_search:
+        # 搜索模式：返回所有匹配结果
+        list = list.all()
+    else:
+        # 普通加载模式：应用分页限制
+        offset = (page_no - 1) * page_size
+        list = list.offset(offset).limit(page_size).all()
 
     result = []
     for report in list:
