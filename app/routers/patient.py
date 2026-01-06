@@ -9,6 +9,7 @@ from app.models.questionnaire import Questionnaire
 from app.models.response import Response
 from app.models.user import UserResponse
 from app.utils.database import get_db
+from app.utils.security import get_current_user_dependency
 from app.config import settings
 from pydantic import BaseModel
 from app.constants import error_codes
@@ -42,6 +43,7 @@ class PatientUpdate(PatientBase):
 
 class PatientResponse(PatientBase):
     id: int
+    created_by_user: int  # 创建患者的用户UID
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -51,34 +53,59 @@ class PatientResponse(PatientBase):
 
 @patient_router.post("", response_model=Response[PatientResponse])
 def create_patient(
-    patient: PatientCreate, 
+    patient: PatientCreate,
+    current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """创建新患者"""
+    """创建新患者（需要认证）
+
+    自动设置 created_by_user 为当前登录用户的 UID
+    """
+    # 检查手机号是否已被当前用户使用
     if patient.phone:
         exists = (
             db.query(Patient)
-            .filter(Patient.phone == patient.phone)
+            .filter(
+                Patient.phone == patient.phone,
+                Patient.created_by_user == current_user.uid
+            )
             .first()
         )
         if exists:
-            return Response(code=error_codes.CONFLICT, message="手机号已存在")
-    db_patient = Patient(**patient.model_dump())
+            return Response(code=error_codes.CONFLICT, message="您已创建过使用此手机号的患者")
+
+    # 创建患者记录，自动设置 created_by_user
+    patient_data = patient.model_dump()
+    patient_data['created_by_user'] = current_user.uid  # 服务端自动设置
+
+    db_patient = Patient(**patient_data)
     db.add(db_patient)
     db.commit()
     db.refresh(db_patient)
+
+    logger.info(f"用户 {current_user.uid} 创建了患者 ID={db_patient.id}")
     return Response(data=db_patient)
 
 
 @patient_router.get("/{patient_id}", response_model=Response[PatientResponse])
 def get_patient(
-    patient_id: int, 
+    patient_id: int,
+    current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """获取单个患者信息"""
+    """获取单个患者信息（需要认证，仅能查看自己创建的患者）"""
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
+
     if patient is None:
         return Response(code=error_codes.NOT_FOUND, message="患者未找到")
+
+    # 权限检查：只能查看自己创建的患者
+    if patient.created_by_user != current_user.uid:
+        return Response(
+            code=error_codes.FORBIDDEN,
+            message="权限不足，只能查看自己创建的患者"
+        )
+
     return Response(data=patient)
 
 
@@ -90,11 +117,16 @@ def get_patient_list(
     gender: Optional[str] = None,
     page_no: int = Query(1, ge=1, description="页码，从1开始"),
     page_size: int = Query(5, ge=1, le=100, description="每页大小"),
+    current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """获取患者列表（支持分页，搜索时返回所有结果）"""
+    """获取患者列表（需要认证，仅返回当前用户创建的患者）
 
-    list = db.query(Patient)
+    支持分页，搜索时返回所有结果
+    """
+
+    # 基础查询：只返回当前用户创建的患者
+    list = db.query(Patient).filter(Patient.created_by_user == current_user.uid)
     is_search = False  # 标记是否为搜索模式
 
     if keyword:
@@ -139,34 +171,55 @@ def get_patient_list(
 
 @patient_router.put("/{patient_id}", response_model=Response[PatientResponse])
 def update_patient(
-    patient_id: int, 
-    patient: PatientUpdate, 
+    patient_id: int,
+    patient: PatientUpdate,
+    current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """更新患者信息"""
+    """更新患者信息（需要认证，仅能更新自己创建的患者）"""
     db_patient = db.query(Patient).filter(Patient.id == patient_id).first()
+
     if db_patient is None:
         return Response(code=error_codes.NOT_FOUND, message="患者未找到")
 
+    # 权限检查：只能更新自己创建的患者
+    if db_patient.created_by_user != current_user.uid:
+        return Response(
+            code=error_codes.FORBIDDEN,
+            message="权限不足，只能更新自己创建的患者"
+        )
+
+    # 更新患者信息（不允许修改 created_by_user）
     for key, value in patient.model_dump(exclude_unset=True).items():
-        setattr(db_patient, key, value)
+        if key != 'created_by_user':  # 防止客户端尝试修改创建者
+            setattr(db_patient, key, value)
 
     db.commit()
     db.refresh(db_patient)
+
+    logger.info(f"用户 {current_user.uid} 更新了患者 ID={patient_id}")
     return Response(data=db_patient)
 
 
 @patient_router.delete("/{patient_id}", response_model=Response)
 def delete_patient(
     patient_id: int,
+    current_user: UserResponse = Depends(get_current_user_dependency),
     db: Session = Depends(get_db)
 ):
-    """删除患者（级联删除关联的报告和问卷）"""
+    """删除患者（需要认证，仅能删除自己创建的患者，级联删除关联的报告和问卷）"""
     try:
         # 查询患者是否存在
         db_patient = db.query(Patient).filter(Patient.id == patient_id).first()
         if db_patient is None:
             return Response(code=error_codes.NOT_FOUND, message="患者未找到")
+
+        # 权限检查：只能删除自己创建的患者
+        if db_patient.created_by_user != current_user.uid:
+            return Response(
+                code=error_codes.FORBIDDEN,
+                message="权限不足，只能删除自己创建的患者"
+            )
 
         # 开始事务（使用 db.begin() 确保事务一致性）
         # 注意：SQLAlchemy Session 默认已经在事务中，但我们显式处理以确保原子性
@@ -184,7 +237,7 @@ def delete_patient(
         db.commit()
 
         # 记录删除信息
-        logger.info(f"成功删除患者 ID={patient_id}，同时删除了 {reports_deleted} 条报告和 {questionnaires_deleted} 条问卷")
+        logger.info(f"用户 {current_user.uid} 成功删除患者 ID={patient_id}，同时删除了 {reports_deleted} 条报告和 {questionnaires_deleted} 条问卷")
 
         # 返回详细的删除信息
         message = f"患者删除成功"
