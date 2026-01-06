@@ -1,14 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional
 from datetime import datetime, date
 from app.models.patient import Patient
+from app.models.report import Report
+from app.models.questionnaire import Questionnaire
 from app.models.response import Response
 from app.models.user import UserResponse
 from app.utils.database import get_db
 from app.config import settings
 from pydantic import BaseModel
 from app.constants import error_codes
+import logging
+
+logger = logging.getLogger(__name__)
 
 patient_router = APIRouter(prefix=f"{settings.API_V1_STR}/patient", tags=["patient"])
 
@@ -152,14 +158,54 @@ def update_patient(
 
 @patient_router.delete("/{patient_id}", response_model=Response)
 def delete_patient(
-    patient_id: int, 
+    patient_id: int,
     db: Session = Depends(get_db)
 ):
-    """删除患者"""
-    db_patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if db_patient is None:
-        return Response(code=error_codes.NOT_FOUND, message="患者未找到")
+    """删除患者（级联删除关联的报告和问卷）"""
+    try:
+        # 查询患者是否存在
+        db_patient = db.query(Patient).filter(Patient.id == patient_id).first()
+        if db_patient is None:
+            return Response(code=error_codes.NOT_FOUND, message="患者未找到")
 
-    db.delete(db_patient)
-    db.commit()
-    return Response(message="Patient deleted successfully")
+        # 开始事务（使用 db.begin() 确保事务一致性）
+        # 注意：SQLAlchemy Session 默认已经在事务中，但我们显式处理以确保原子性
+
+        # 1. 首先删除关联的报告
+        reports_deleted = db.query(Report).filter(Report.patient_id == patient_id).delete(synchronize_session=False)
+
+        # 2. 删除关联的问卷
+        questionnaires_deleted = db.query(Questionnaire).filter(Questionnaire.patient_id == patient_id).delete(synchronize_session=False)
+
+        # 3. 最后删除患者记录
+        db.delete(db_patient)
+
+        # 提交事务
+        db.commit()
+
+        # 记录删除信息
+        logger.info(f"成功删除患者 ID={patient_id}，同时删除了 {reports_deleted} 条报告和 {questionnaires_deleted} 条问卷")
+
+        # 返回详细的删除信息
+        message = f"患者删除成功"
+        if reports_deleted > 0 or questionnaires_deleted > 0:
+            message += f"（同时删除了 {reports_deleted} 条关联报告和 {questionnaires_deleted} 条关联问卷）"
+
+        return Response(message=message)
+
+    except SQLAlchemyError as e:
+        # 发生错误时回滚事务
+        db.rollback()
+        logger.error(f"删除患者失败 ID={patient_id}: {str(e)}", exc_info=True)
+        return Response(
+            code=error_codes.INTERNAL_SERVER_ERROR,
+            message=f"删除患者失败：数据库操作错误"
+        )
+    except Exception as e:
+        # 处理其他未预期的错误
+        db.rollback()
+        logger.error(f"删除患者时发生未知错误 ID={patient_id}: {str(e)}", exc_info=True)
+        return Response(
+            code=error_codes.INTERNAL_SERVER_ERROR,
+            message="删除患者失败：系统错误"
+        )
